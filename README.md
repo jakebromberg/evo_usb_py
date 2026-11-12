@@ -2,6 +2,8 @@
 
 Official repo: https://github.com/Evo-Programming/evo_usb_py
 
+**This fork cannot install an OS.** The upstream `--send-os` command and its helpers are removed, and every outgoing packet is checked so that a request to the calculator's OS-update endpoint (`hh01/upd/...`) raises `OSUpdateRefused` before anything is sent. `--extract-os` remains because it only reads a local capture file. Run `python3 -m unittest discover -s tests` to check the guard.
+
 Uses Kermit file transfer protocol over the serial device exposed by the calculator.
 
 You may have to adjust your permissions for serial access:  
@@ -24,7 +26,6 @@ Usage: python3 evo_usb.py ...
   --delete-file <name> [type]
   --send-csv-list <csv> <name> [ram|archive] [overwrite|no-overwrite]
   --send-csv-matrix <csv> <name> [ram|archive] [overwrite|no-overwrite]
-  --send-os <os_bundle.83b2|84b2|84tb2>
   --extract-os <capture.pcapng> [output.bin]
   --get-info
   --dynamic-info

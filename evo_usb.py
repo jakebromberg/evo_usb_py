@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send Python scripts, OS images, and take screenshots on Evo
+"""Send Python scripts and files, and take screenshots on Evo
 
 https://github.com/Evo-Programming/evo_usb_py
 
@@ -12,7 +12,6 @@ Usage: python3 evo_usb.py <script.py> [varname]
        python3 evo_usb.py --delete-file <name> [type]
        python3 evo_usb.py --send-csv-list <csv> <name> [ram|archive] [overwrite|no-overwrite]
        python3 evo_usb.py --send-csv-matrix <csv> <name> [ram|archive] [overwrite|no-overwrite]
-       python3 evo_usb.py --send-os <os_bundle.83b2|84b2|84tb2>
        python3 evo_usb.py --extract-os <capture.pcapng> [output.bin]
        python3 evo_usb.py --get-info
        python3 evo_usb.py --reboot
@@ -34,7 +33,6 @@ import socket
 import struct
 import sys
 import time
-import zipfile
 import zlib
 
 
@@ -194,7 +192,17 @@ class KermitSession:
                 self.max_packet_len = min(maxlx, 2040)
 
 
+class OSUpdateRefused(RuntimeError):
+    """Raised when something tries to send an OS update request."""
+
+
+# This fork never installs an OS: a failed install can leave the calculator unusable.
+_OS_UPDATE_PREFIX = b"hh01/upd/"
+
+
 def make_packet(seq, pkt_type, data=b"", session=None, check_type=None):
+    if pkt_type in ("F", ord("F")) and bytes(data).lower().startswith(_OS_UPDATE_PREFIX):
+        raise OSUpdateRefused("refusing to send an OS update request")
     if check_type is None:
         check_type = session.check_type if session is not None else 1
     s, t = tochar(seq % 64), ord(pkt_type) if isinstance(pkt_type, str) else pkt_type
@@ -1659,18 +1667,6 @@ OS_PRODUCTS = {
     25: "TI-84 Evo-T",
 }
 
-OS_BUNDLE_PRODUCTS = {
-    ".84b2": 23,
-    ".83b2": 24,
-    ".84tb2": 25,
-}
-
-OS_EXTRACTED_PACKAGE_PRODUCTS = {
-    ".84pk2": 23,
-    ".83pk2": 24,
-    ".84tpk2": 25,
-}
-
 OS_SECTION_NAMES = {
     0x6B: "secure",
     0x41: "os_84",
@@ -1724,102 +1720,6 @@ def parse_os_header(data):
         "data_size": data_size,
         "version": f"{ver_major}.0.0.{ver_build}",
     }
-
-
-def _parse_bundle_metadata(data):
-    text = data.decode("utf-8", errors="replace")
-    metadata = {}
-    for line in text.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        metadata[key.strip()] = value.strip()
-    return metadata
-
-
-def _read_os_bundle(path):
-    package_name = os.path.basename(path)
-    metadata = {}
-
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
-            if "METADATA" in names:
-                metadata = _parse_bundle_metadata(zf.read("METADATA"))
-            candidates = [
-                name
-                for name in names
-                if not name.endswith("/")
-                and os.path.basename(name) != "METADATA"
-                and os.path.splitext(name.lower())[1] in OS_EXTRACTED_PACKAGE_PRODUCTS
-            ]
-            if not candidates:
-                raise RuntimeError(f"no OS package found inside {path}")
-            package_name = candidates[0]
-            return zf.read(package_name), metadata, package_name
-
-    with open(path, "rb") as f:
-        return f.read(), metadata, package_name
-
-
-def _infer_os_product(path, metadata, package_name):
-    ext = os.path.splitext(path.lower())[1]
-    if ext in OS_BUNDLE_PRODUCTS:
-        return OS_BUNDLE_PRODUCTS[ext], f"{ext} bundle extension"
-
-    metadata_prodnum = metadata.get("bundle_target_prodid")
-    if metadata_prodnum:
-        try:
-            return int(metadata_prodnum, 0), "bundle metadata"
-        except ValueError:
-            pass
-
-    for candidate in (package_name, path):
-        ext = os.path.splitext(candidate.lower())[1]
-        if ext in OS_EXTRACTED_PACKAGE_PRODUCTS:
-            return OS_EXTRACTED_PACKAGE_PRODUCTS[ext], f"{ext} extracted package extension"
-
-    raise RuntimeError(
-        f"could not determine target calculator model from {path}; "
-        "use a .84b2, .83b2, .84tb2 bundle or an extracted .84pk2, .83pk2, .84tpk2 package"
-    )
-
-
-def _product_name(prodnum):
-    return OS_PRODUCTS.get(prodnum, f"unknown product {prodnum}")
-
-
-def _connected_os_product():
-    product = get_device_info().get("product")
-    if product is None:
-        return None, None
-
-    text = str(product)
-    try:
-        prodnum = int(text.split("-", 1)[0], 0)
-    except ValueError:
-        return None, text
-    return prodnum, text
-
-
-def _warn_os_product_mismatch(expected_prodnum):
-    try:
-        actual_prodnum, product_text = _connected_os_product()
-    except (Exception, SystemExit) as e:
-        print(f"  warning: could not verify connected calculator product: {e}")
-        return
-
-    if actual_prodnum is None:
-        print(f"  warning: could not parse connected calculator product: {product_text}")
-        return
-
-    if actual_prodnum != expected_prodnum:
-        print(
-            "  warning: OS package targets "
-            f"{_product_name(expected_prodnum)} (prodnum {expected_prodnum}), "
-            "but connected calculator reports "
-            f"{_product_name(actual_prodnum)} (product {product_text})"
-        )
 
 
 def _infer_os_product_from_sections(sections):
@@ -1956,72 +1856,6 @@ def parse_os_bundle_data(data):
             version = s["version"]
 
     return data, sections, version
-
-
-def send_os(path):
-    data, metadata, package_name = _read_os_bundle(path)
-    data, sections, version = parse_os_bundle_data(data)
-    prodnum, prodnum_source = _infer_os_product(path, metadata, package_name)
-
-    print(f"OS bundle: {path}")
-    if package_name != os.path.basename(path):
-        print(f"  package: {package_name}")
-    print(f"  size: {len(data)} bytes")
-    print(f"  version: {version}")
-    print(f"  target: {_product_name(prodnum)} (prodnum {prodnum}, {prodnum_source})")
-    print(f"  sections: {len(sections)}")
-    for i, s in enumerate(sections):
-        tname = _os_section_name(data, s, prodnum)
-        print(
-            f"    [{i}] {tname}: {s['data_size']} bytes @ {s['offset']:#x}, v{s['version']}"
-        )
-
-    _warn_os_product_mismatch(prodnum)
-
-    print("  encoding...", end="", flush=True)
-    wire = encode(data)
-
-    os_timeout = 30000
-    url = f"hh01/upd/pkg?bundle=1&prodnum={prodnum}&version={version}"
-    attrs = file_attr('"', "B8") + file_attr("1", str(len(data))) + file_attr("@")
-
-    dev = connect()
-    try:
-        session = KermitSession()
-        seq = 0
-        send_pkt(dev, seq, "S", S_INIT, timeout=os_timeout, session=session)
-        seq += 1
-        send_pkt(dev, seq, "F", url.encode(), timeout=os_timeout, session=session)
-        seq += 1
-        send_pkt(dev, seq, "A", attrs, timeout=os_timeout, session=session)
-        seq += 1
-
-        wire_chunks = _split_element_aligned(wire, session.data_chunk_size)
-        total_encoded = sum(len(c) for c in wire_chunks)
-        print(f" {total_encoded} bytes, {len(wire_chunks)} chunks")
-
-        total_chunks = len(wire_chunks)
-        for chunk_num, chunk in enumerate(wire_chunks, 1):
-            if chunk_num % 200 == 0 or chunk_num == total_chunks:
-                pct = chunk_num * 100 // total_chunks
-                print(
-                    f"\r  sending: {pct}% ({chunk_num}/{total_chunks})",
-                    end="",
-                    flush=True,
-                )
-            send_pkt(dev, seq, "D", chunk, timeout=os_timeout, session=session)
-            seq += 1
-
-        print()
-        send_pkt(dev, seq, "Z", timeout=os_timeout, session=session)
-        seq += 1
-        try:
-            send_pkt(dev, seq, "B", timeout=os_timeout, session=session)
-        except TRANSFER_ERROR_EXCEPTIONS:
-            pass
-        print(f"sent OS bundle ({len(data)} bytes, {total_chunks} packets)")
-    finally:
-        release(dev)
 
 
 def _split_element_aligned(wire, chunk_size=2000):
@@ -2219,10 +2053,6 @@ if __name__ == "__main__":
         target = sys.argv[4] if len(sys.argv) > 4 else "ram"
         overwrite = sys.argv[5] if len(sys.argv) > 5 else "overwrite"
         send_csv_matrix(sys.argv[2], sys.argv[3], target, overwrite)
-    elif sys.argv[1] == "--send-os":
-        if len(sys.argv) < 3:
-            sys.exit("usage: evo_usb.py --send-os <os_bundle.83b2|84b2|84tb2>")
-        send_os(sys.argv[2])
     elif sys.argv[1] == "--extract-os":
         if len(sys.argv) < 3:
             sys.exit("usage: evo_usb.py --extract-os <capture.pcapng> [output.bin]")
@@ -2254,6 +2084,8 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             sys.exit("usage: evo_usb.py --key <scancode> [scancode ...]")
         send_scancodes(parse_scancode_args(sys.argv[2:]))
+    elif sys.argv[1].startswith("--"):
+        sys.exit(f"unknown option: {sys.argv[1]}")
     else:
         name = sys.argv[2] if len(sys.argv) > 2 else "pyscript"
         if not is_valid_evo_python_name(name):
